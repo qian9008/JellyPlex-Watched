@@ -1,0 +1,158 @@
+# ===========================================================================
+# jellyplex-watched configuration
+#
+# Direction model: "X pushes to Y."
+#   - Each server lists `sync_to: [names]` — the servers it pushes watch
+#     state TO. Bidirectional sync = list the relationship both ways.
+#   - user_sync_rules override user blacklist/whitelist filters for their
+#     from -> to direction. library_sync_rules override library name/type
+#     filters for their direction. Each exception affects only its own scope.
+#   - For a direction absent from sync_to: user-only rules use normal library
+#     filtering and library-only rules use normal user filtering. When both
+#     kinds exist, their permissions add together; neither limits the other.
+#     A matching rule in each scope can override both scopes' filters.
+#   - sync_to remains the broad default for identities without a matching
+#     exception. Normal filters use whitelist precedence over blacklist.
+#     To exclude an identity covered by a rule, narrow/remove that rule too.
+#
+# Casing: server names are case-SENSITIVE internal identifiers. Usernames,
+#   library names, and canonicals are matched case-INSENSITIVELY.
+# ===========================================================================
+
+# --- operational knobs -----------------------------------------------------
+dryrun: true # true = log what would happen, change nothing
+debug_level: INFO # INFO | DEBUG | TRACE
+run_only_once: false # true = run a single pass and exit
+sleep_duration: 3600 # seconds between passes (when run_only_once=false)
+log_file: log.log
+mark_file: mark.log
+request_timeout: 300 # per-request timeout in seconds
+max_threads: 1
+generate_guids: true # match items across servers via provider GUIDs
+generate_locations: true # match items across servers via file paths
+
+# --- filtering (global defaults, overridden by matching scope rules) --------
+# Whitelist beats blacklist: if a whitelist is non-empty, only listed
+# entries pass and the matching blacklist is ignored. Can be list or
+# new line entries. Library types use the values reported by each adapter:
+# Plex uses movie/show; Jellyfin and Emby use movies/tvshows.
+# Without a library override, configured type filters require known types
+# for both source and destination libraries before writing history.
+# A user exception does not bypass library filters; a library exception does
+# not bypass user filters. Unsupported media types remain unsupported.
+blacklist_users: []
+whitelist_users: []
+blacklist_libraries: []
+whitelist_libraries: []
+blacklist_library_types: ["music", "photos"]
+whitelist_library_types:
+  - "movie"
+  - "show"
+  - "movies"
+  - "tvshows"
+
+# --- servers ----------------------------------------------------------------
+# A credential-only environment override can target these names without
+# replacing the server definitions: JPW_SERVER_TOKENS='{"plex-main":"TOKEN"}'
+plex:
+  - name: plex-main # unique identifier, referenced everywhere below
+    baseurl: http://plex.lan:32400
+    sync_to: [jellyfin-main, emby-main] # pushes TO these (bidirectional below)
+    token: "PLEX_TOKEN_HERE" # preferred auth path
+    ssl_bypass: false
+
+  - name: plex-readonly # auth via username/password/servername triple
+    baseurl: https://plex.example.com:32400
+    sync_to: [] # no default outbound sync; a user_sync_rule can enable pushes
+    username: myplexuser
+    password: "myplexpassword"
+    servername: "My Plex Server"
+    ssl_bypass: false
+
+jellyfin:
+  - name: jellyfin-main
+    baseurl: http://jellyfin.lan:8096
+    sync_to: [plex-main] # completes bidirectional sync with plex-main
+    token: "JELLYFIN_API_KEY_HERE"
+
+emby:
+  - name: emby-main
+    baseurl: http://emby.lan:8096
+    sync_to: [plex-main] # completes bidirectional sync with plex-main
+    token: "EMBY_API_KEY_HERE"
+
+# --- user mappings ----------------------------------------------------------
+# Only needed when usernames DIFFER across servers, when one identity fans
+# out to multiple users on a server, or to use a canonical name in rules.
+# Users with identical usernames everywhere are matched automatically if set to
+# sync in the server configs and need no entry here.
+user_mappings:
+  # Same person, different username on each server.
+  - canonical: alice
+    aliases:
+      - { server: plex-main, username: alice_plex }
+      - { server: plex-readonly, username: alice }
+      - { server: jellyfin-main, username: alice.jf }
+      - { server: emby-main, username: alice_emby }
+
+  # One-to-many fan-out: a shared family Plex account maps to several
+  # individual Jellyfin users (multiple aliases on the same server).
+  - canonical: family
+    aliases:
+      - { server: plex-main, username: family_shared }
+      - { server: plex-readonly, username: family_shared }
+      - { server: jellyfin-main, username: dad }
+      - { server: jellyfin-main, username: mom }
+      - { server: jellyfin-main, username: kid }
+
+# --- library mappings -------------------------------------------------------
+# Same shape as user_mappings; needed when library names differ or to use a
+# canonical name in rules. Literal same-name rules do not need mappings.
+library_mappings:
+  - canonical: tv
+    aliases:
+      - { server: plex-main, library: "TV Shows" }
+      - { server: plex-readonly, library: "TV Shows" }
+      - { server: jellyfin-main, library: "Shows" }
+      - { server: emby-main, library: "Television" }
+
+  - canonical: movies
+    aliases:
+      - { server: plex-main, library: "Movies" }
+      - { server: plex-readonly, library: "Movies" }
+      - { server: jellyfin-main, library: "Films" }
+      - { server: emby-main, library: "Films" }
+
+# --- per-user sync overrides ------------------------------------------------
+# "from" pushes to "to" for the listed users. Bidirectional = two rules.
+# users may be canonicals (above) or literal usernames present on both
+# servers. Use users: ["*"] to override user filters for all matching users.
+# A user rule permits normally allowed libraries plus any libraries enabled
+# by library rules for the same direction.
+user_sync_rules:
+  # Enable a direction the server-level config alone wouldn't:
+  # push alice's state from the read-only Plex to jellyfin-main.
+  - users: [alice]
+    from: plex-readonly
+    to: jellyfin-main
+
+# --- per-library sync overrides --------------------------------------------
+# "from" pushes to "to" for the listed libraries. Bidirectional = two rules.
+# libraries may be canonicals (above) or literal library names.
+# Matching rules override library-name filters and both endpoints' type
+# filters. Use libraries: ["*"] to apply the exception to all mapped libraries
+# and unmapped runtime libraries.
+# Alone, a library rule permits normally allowed users.
+library_sync_rules:
+  # Enable a direction the server-level config alone wouldn't:
+  # All normally allowed users can sync Movies. Alice also keeps her normally
+  # permitted libraries, plus Movies even if it is otherwise filtered out.
+  - libraries: [movies]
+    from: plex-readonly
+    to: jellyfin-main
+
+  # Independent library-only direction: all normally allowed users can send
+  # their mapped Movies history to Emby, without a companion user rule.
+  - libraries: [movies]
+    from: plex-readonly
+    to: emby-main
