@@ -129,12 +129,58 @@ JPW_ 前缀环境变量  >  .env(JPW_ 前缀)  >  legacy 环境变量  >  config
 模拟，慢十倍以上。需要 arm64 时把 `Build Push` 步骤的 `platforms` 改回
 `linux/amd64,linux/arm64` 即可，其余不用动。
 
-### 4.6 测试（`test/test_home_videos.py`，新增 5 例）
+### 4.6 日志输出适配中文环境
+
+三处改动，解决中文库名/用户名在日志里不可读的问题：
+
+1. `src/functions.py` 的 `formatter()`：`json.dumps` 增加 `ensure_ascii=False`。
+   这是**最主要的一项**——之前中文会被转义成 `\u5bb6\u5ead...`，日志完全没法读。
+2. `src/functions.py` 的 `configure_logger()`：日志文件 sink 增加
+   `encoding="utf-8"`。loguru 默认按 locale 编码写文件，容器里 locale 多为
+   C/POSIX，写中文会直接 `UnicodeEncodeError`。
+3. `Dockerfile.alpine` / `Dockerfile.slim`：增加 `PYTHONUTF8=1` 与
+   `PYTHONIOENCODING=utf-8`，保证控制台（`docker logs`）输出中文正常。
+
+注意：`src/functions.py` 原本是 **CRLF/LF 混合行尾**，用编辑器整体重写会让
+diff 变成整个文件、后续同步上游全是冲突。改动时必须保留原有行尾，
+只替换目标片段（本次用了 `/tmp/patch_functions.py` 这类原子化脚本）。
+
+### 4.7 测试（`test/test_home_videos.py`，新增 5 例）
 
 覆盖：声明式 homevideos 库识别、无 CollectionType 时靠 Video 条目推断、
 纯照片库仍被排除、家庭视频库查询用 Video、电影库仍用 Movie（防回归）。
 
 全量测试：323 passed。
+
+### 4.8 修复启动报错 `has duplicate alias`
+
+现象（容器启动即退出）：
+
+```
+Startup error: configuration validation failed: configuration: Value error,
+user_mappings[xxx] has duplicate alias (jellyfin-main, xxx).
+```
+
+成因：`src/settings.py` 的 `_validate_alias_ownership()` 规定，同一个
+canonical 下不能出现两次相同的 `(server, 名称)`（名称按 `casefold` 比较）。
+但 legacy `USER_MAPPING` 的迁移逻辑（`legacy_settings._build_legacy_mappings`）
+会把一对名字的**左右两个都**注册到**每一台**服务器上；当左右名字相同时
+（例如 `USER_MAPPING={"xxx": "xxx"}`），同一台服务器上就注册了两次，
+于是迁移生成的 config.yaml 自己就过不了校验——属于上游 bug。
+
+修复（两处）：
+
+1. `src/settings.py`：`UserMapping` / `LibraryMapping` 增加 after 校验器，
+   丢弃重复的 `(server, 名称)` 别名并打警告，不再直接拒绝配置。
+   跨 canonical 抢占同一身份（两个 canonical 声明同一个 `(server, 名称)`）
+   仍然报错，那是真冲突。
+2. `src/legacy_settings.py`：`_build_legacy_mappings` 生成别名时按
+   `(server, casefold(name))` 去重，迁移产出的 config.yaml 本身就是干净的。
+
+配套测试 `test/test_alias_dedupe.py`（6 例）。全量测试：329 passed。
+
+补充：如果两端用户名本来相同，**根本不需要写 user_mappings**——同步引擎会
+按同名自动匹配，直接删掉这段配置即可。
 
 ## 5. 已知限制
 

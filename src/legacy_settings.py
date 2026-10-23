@@ -372,8 +372,15 @@ def _build_legacy_mappings(
     out: list[dict[str, Any]] = []
     for left, right in pairs.items():
         aliases: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
         for server in server_names:
             for alias_value in (left, right):
+                # A pair like {"alice": "alice"} would otherwise register the
+                # same alias twice on every server.
+                key = (server, alias_value.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
                 aliases.append({"server": server, name_field: alias_value})
         out.append({"canonical": left, "aliases": aliases, "legacy": True})
     return out

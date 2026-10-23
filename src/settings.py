@@ -83,7 +83,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from functools import cached_property
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 import yaml
 from loguru import logger
@@ -343,6 +343,13 @@ class UserMapping(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _drop_duplicate_aliases(self) -> "UserMapping":
+        self.aliases = _dedupe_mapping_aliases(
+            self.aliases, "username", self.canonical, "user_mappings"
+        )
+        return self
+
 
 class LibraryAlias(BaseModel):
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -364,6 +371,13 @@ class LibraryMapping(BaseModel):
             "LIBRARY_MAPPING entry."
         ),
     )
+
+    @model_validator(mode="after")
+    def _drop_duplicate_aliases(self) -> "LibraryMapping":
+        self.aliases = _dedupe_mapping_aliases(
+            self.aliases, "library", self.canonical, "library_mappings"
+        )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +452,43 @@ class LibrarySyncRule(BaseModel):
 def _normalized_names(values: list[str]) -> set[str]:
     """Normalize a list of user, library, or type names for lookup."""
     return {normalize_name(value) for value in values}
+
+
+_AliasT = TypeVar("_AliasT", UserAlias, LibraryAlias)
+
+
+def _dedupe_mapping_aliases(
+    aliases: list[_AliasT],
+    alias_field: Literal["username", "library"],
+    canonical: str,
+    mapping_field: str,
+) -> list[_AliasT]:
+    """Drop aliases repeating an earlier (server, name) pair.
+
+    A repeated pair carries no information: it is the same identity on the
+    same server. The legacy USER_MAPPING / LIBRARY_MAPPING migration emits
+    them whenever both names in a pair are equal (for example
+    ``{"alice": "alice"}``), which would make the generated config.yaml
+    unusable. Redundant entries are dropped with a warning instead; the
+    ownership check still rejects one (server, name) claimed by two
+    different canonicals, which is a real conflict.
+    """
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[_AliasT] = []
+    for alias in aliases:
+        alias_name = getattr(alias, alias_field)
+        key = (alias.server, normalize_name(alias_name))
+        if key in seen:
+            logger.warning(
+                f"{mapping_field}[{canonical}]: ignoring duplicate alias "
+                f"({alias.server}, {alias_name})."
+            )
+            continue
+        seen.add(key)
+        unique.append(alias)
+
+    return unique
 
 
 def _validate_alias_ownership(
