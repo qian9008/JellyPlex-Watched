@@ -50,6 +50,7 @@ whitelist_library_types:
   - "show"
   - "movies"
   - "tvshows"
+  - "homevideos"
 
 # --- servers ----------------------------------------------------------------
 # A credential-only environment override can target these names without

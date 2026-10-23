@@ -32,6 +32,26 @@ from src.watched import (
     resulting_media_item,
 )
 
+# 支持的库类型。homevideos 对应 Jellyfin/Emby 的“家庭视频与照片”库，
+# 其内部条目类型是 Video（没有季/集层级），因此按扁平影片流程处理，
+# 复用 LibraryData.movies 容器，不必引入第三种数据结构。
+LIBRARY_TYPE_MOVIES = "movies"
+LIBRARY_TYPE_TVSHOWS = "tvshows"
+LIBRARY_TYPE_HOMEVIDEOS = "homevideos"
+SUPPORTED_LIBRARY_TYPES = (
+    LIBRARY_TYPE_MOVIES,
+    LIBRARY_TYPE_TVSHOWS,
+    LIBRARY_TYPE_HOMEVIDEOS,
+)
+
+# 条目类型 -> 库类型。仅在库自身未声明 CollectionType 时用于推断。
+ITEM_TYPE_TO_LIBRARY_TYPE = {
+    "Movie": LIBRARY_TYPE_MOVIES,
+    "Episode": LIBRARY_TYPE_TVSHOWS,
+    # 家庭视频库的条目；照片(Photo)不在其中，因此图文混排的库仍会被跳过
+    "Video": LIBRARY_TYPE_HOMEVIDEOS,
+}
+
 
 def extract_identifiers_from_item(
     server_type: str,
@@ -279,7 +299,9 @@ class JellyfinEmby:
                 all_types = set(
                     [x.get("Type") for x in library_items.get("Items", [])]
                 )
-                types = set([x for x in all_types if x in ["Movie", "Episode"]])
+                types = set(
+                    [x for x in all_types if x in ITEM_TYPE_TO_LIBRARY_TYPE]
+                )
 
                 if not len(types) == 1:
                     logger.debug(
@@ -287,13 +309,9 @@ class JellyfinEmby:
                     )
                     continue
 
-                library_type = types.pop()
+                library_type = ITEM_TYPE_TO_LIBRARY_TYPE[types.pop()]
 
-                library_type = (
-                    "movies" if library_type == "Movie" else "tvshows"
-                )
-
-            if library_type not in ["movies", "tvshows"]:
+            if library_type not in SUPPORTED_LIBRARY_TYPES:
                 logger.debug(
                     f"{self.server_type}: Skipping Library {library_title} found type {library_type}",
                 )
@@ -307,7 +325,7 @@ class JellyfinEmby:
         self,
         user_name: str,
         user_id: str,
-        library_type: Literal["movies", "tvshows"],
+        library_type: Literal["movies", "tvshows", "homevideos"],
         library_id: str,
         library_title: str,
     ) -> LibraryData | None:
@@ -318,12 +336,18 @@ class JellyfinEmby:
             )
             watched = LibraryData(title=library_title)
 
-            # Movies
-            if library_type == "movies":
+            # 影片：电影库与家庭视频库都是扁平结构（无季/集层级），共用此流程，
+            # 区别只在 Jellyfin/Emby 查询时的 IncludeItemTypes（Movie vs Video）。
+            if library_type in (LIBRARY_TYPE_MOVIES, LIBRARY_TYPE_HOMEVIDEOS):
+                include_item_types = (
+                    "Video"
+                    if library_type == LIBRARY_TYPE_HOMEVIDEOS
+                    else "Movie"
+                )
                 movie_items = []
                 watched_items = self.query(
                     f"/Users/{user_id}/Items"
-                    + f"?ParentId={library_id}&Filters=IsPlayed&IncludeItemTypes=Movie&CollapseBoxSetItems=false&Recursive=True&Fields=ItemCounts,ProviderIds,Path,UserDataLastPlayedDate",
+                    + f"?ParentId={library_id}&Filters=IsPlayed&IncludeItemTypes={include_item_types}&CollapseBoxSetItems=false&Recursive=True&Fields=ItemCounts,ProviderIds,Path,UserDataLastPlayedDate",
                     "get",
                 )
 
@@ -335,7 +359,7 @@ class JellyfinEmby:
 
                 in_progress_items = self.query(
                     f"/Users/{user_id}/Items"
-                    + f"?ParentId={library_id}&Filters=IsResumable&IncludeItemTypes=Movie&CollapseBoxSetItems=false&Recursive=True&Fields=ItemCounts,ProviderIds,Path,UserDataLastPlayedDate",
+                    + f"?ParentId={library_id}&Filters=IsResumable&IncludeItemTypes={include_item_types}&CollapseBoxSetItems=false&Recursive=True&Fields=ItemCounts,ProviderIds,Path,UserDataLastPlayedDate",
                     "get",
                 )
 
@@ -557,14 +581,14 @@ class JellyfinEmby:
                         )
                         continue
 
-                    if library_type != "movies" and library_type != "tvshows":
+                    if library_type not in SUPPORTED_LIBRARY_TYPES:
                         continue
 
                     # Get watched for user
                     library_data = self.get_user_library_watched(
                         user_name,
                         user_id,
-                        "movies" if library_type == "movies" else "tvshows",
+                        library_type,
                         library_id,
                         library_title,
                     )
@@ -643,7 +667,9 @@ class JellyfinEmby:
                 jellyfin_search = self.query(
                     f"/Users/{user_id}/Items"
                     + f"?SortBy=SortName&SortOrder=Ascending&Recursive=True&ParentId={library_id}"
-                    + "&Fields=ItemCounts,ProviderIds,Path&IncludeItemTypes=Movie&CollapseBoxSetItems=false",
+                    # 同时查 Movie 与 Video：写入的目标库类型可能与源库不同
+                    # （例如家庭视频库 <-> 电影库互相同步），两种条目都要能命中。
+                    + "&Fields=ItemCounts,ProviderIds,Path&IncludeItemTypes=Movie,Video&CollapseBoxSetItems=false",
                     "get",
                 )
             except Exception as error:

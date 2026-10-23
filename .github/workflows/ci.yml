@@ -147,6 +147,11 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: pytest
+    # 推镜像到 GHCR 必须有 packages: write。默认的 GITHUB_TOKEN 只有读权限，
+    # 少了这一段推送会直接 403。
+    permissions:
+      contents: read
+      packages: write
     env:
       DEFAULT_VARIANT: alpine
       IMAGE: jellyplex-watched:smoke-${{ matrix.variant }}
@@ -190,9 +195,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKER_USERNAME }}/jellyplex-watched,enable=${{ secrets.DOCKER_USERNAME != '' }}
-            # Do not push to ghcr.io on PRs due to permission issues, only push if the owner is luigi311 so it doesnt fail on forks
-            ghcr.io/${{ github.repository }},enable=${{ github.event_name != 'pull_request' && github.repository_owner == 'luigi311'}}
+            # GHCR 要求镜像名全小写：仓库名 JellyPlex-Watched 含大写，
+            # 直接用 ${{ github.repository }} 会导致推送时 reference 非法。
+            # PR 不推送（fork 的 token 没有 packages: write 权限）。
+            ghcr.io/${{ github.repository_owner }}/jellyplex-watched,enable=${{ github.event_name != 'pull_request' }}
           flavor: latest=false
           tags: |
             type=raw,value=latest,enable=${{ matrix.variant == env.DEFAULT_VARIANT && startsWith(github.ref, 'refs/tags/') }}
@@ -300,18 +306,8 @@ jobs:
       - name: "Validate Docker startup paths"
         run: uv run test/docker_smoke.py --image "$IMAGE"
 
-      - name: Login to DockerHub
-        if: "${{ env.DOCKER_USERNAME != '' }}"
-        id: docker_login
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-
       - name: Login to GitHub Container Registry
-        if: "${{ github.event_name != 'pull_request' && github.repository_owner == 'luigi311' }}"
+        if: "${{ github.event_name != 'pull_request' }}"
         id: ghcr_login
         uses: docker/login-action@v3
         with:
@@ -325,8 +321,10 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: ${{ steps.docker_login.outcome == 'success' || steps.ghcr_login.outcome == 'success' }}
+          # 只构建 x86_64。arm64 在 amd64 runner 上要靠 QEMU 模拟，慢十倍以上；
+          # 需要 arm64 时把这里改回 linux/amd64,linux/arm64。
+          platforms: linux/amd64
+          push: ${{ steps.ghcr_login.outcome == 'success' }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
 
