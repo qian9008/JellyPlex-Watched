@@ -5,6 +5,11 @@ ENV PGID=1000
 ENV GOSU_VERSION=1.17
 ENV YAML_FILE=/app/config/config.yaml
 
+# 强制 Python 全程使用 UTF-8：容器默认 locale 是 C/POSIX，
+# 不设这两项时控制台输出中文会乱码或报错（日志文件已在代码里显式指定 utf-8）
+ENV PYTHONUTF8=1
+ENV PYTHONIOENCODING=utf-8
+
 RUN apk add --no-cache tini dos2unix
 
 # Install gosu

@@ -42,7 +42,11 @@ def formatter(record) -> str:
         data = data.model_dump(mode="json")
 
     if isinstance(data, dict) or hasattr(data, "__dataclass_fields__"):
-        data_str = json.dumps(data, indent=4, default=_json_default)
+        # ensure_ascii=False：否则日志里的中文库名/用户名会被转义成 \uXXXX，
+        # 完全没法读。这是日志面向中文环境的关键一项。
+        data_str = json.dumps(
+            data, indent=4, default=_json_default, ensure_ascii=False
+        )
         lines = [line.rstrip() for line in data_str.splitlines()]
         lines.insert(0, "")
     elif isinstance(data, list):
@@ -72,7 +76,15 @@ def configure_logger(
         raise Exception(msg)
 
     # Add a sink for file logging and the console.
-    logger.add(sink=log_file, level=debug_level, mode="w", format=formatter)
+    # 显式指定 utf-8：loguru 默认用 locale 编码，容器里 locale 常是 C/POSIX，
+    # 写中文会直接 UnicodeEncodeError。
+    logger.add(
+        sink=log_file,
+        level=debug_level,
+        mode="w",
+        format=formatter,
+        encoding="utf-8",
+    )
     logger.add(sink=sys.stdout, level=debug_level, format=formatter)
 
 
