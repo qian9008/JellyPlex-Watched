@@ -182,6 +182,54 @@ canonical 下不能出现两次相同的 `(server, 名称)`（名称按 `casefol
 补充：如果两端用户名本来相同，**根本不需要写 user_mappings**——同步引擎会
 按同名自动匹配，直接删掉这段配置即可。
 
+### 4.9 过滤器：只想同步指定用户 / 指定库
+
+**关键结论：`USER_MAPPING` / `LIBRARY_MAPPING`（及新版 `user_mappings` /
+`library_mappings`）不是过滤器，是"翻译表"。** 它们只负责回答"这个身份在另一台
+服务器上叫什么"，完全不参与"要不要同步"的决策。
+
+证据：`src/users.py:combine_user_lists` 遍历服务器上的**全部**用户，是否同步由
+`settings.should_sync_user()` 判断；映射只在 `sync_targets_for_user()` 里用来
+解析对端用户名。
+
+要限定范围，用这两组（白名单优先于黑名单，白名单非空时黑名单失效）：
+
+```yaml
+whitelist_users: ["alice", "bob"]        # 只同步这些用户
+whitelist_libraries: ["Movies", "家庭视频"]  # 只同步这些库
+# 或用反向排除：blacklist_users / blacklist_libraries
+```
+
+Docker 环境变量写法（legacy 名，逗号分隔，注意 LIBRARY 是单数）：
+
+```
+WHITELIST_USERS=alice,bob
+WHITELIST_LIBRARY=Movies,家庭视频
+```
+
+实测行为（`settings.should_sync_user` / `should_sync_library`）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 白名单外的用户 bob | False（不同步） |
+| 白名单用户 alice 的**映射别名** alice_plex | True（用户过滤是身份感知的，canonical 与所有别名任一命中即可） |
+| 库 Movies 在白名单内 | True |
+| 库 Films（对端名，是 `movies` 的别名但不在白名单） | **False** |
+| 加了 `user_sync_rules: users: ["*"]` 后，白名单外的 bob | **True（规则绕过白名单）** |
+
+三个必须记住的坑：
+
+1. **库白名单只匹配字面库名**，不做 canonical/别名展开（见 `settings.py:1384`
+   只传了 `{normalize_name(library)}`）。两端库名不一样时，**两个名字都要写进
+   白名单**，否则反向同步会被静默跳过。用户白名单则相反，是身份感知的。
+2. **`user_sync_rules` / `library_sync_rules` 是加法，会覆盖同名过滤**
+   （`should_sync_user` 里 `_matches_user_rule` 命中即 `return True`）。
+   配了 `users: ["*"]` 就等于放行所有用户，白名单形同虚设。想限定范围就别用
+   通配符规则。
+3. 库类型白名单（`whitelist_library_types`）非空时，**必须包含 `homevideos`**，
+   否则家庭视频库会被过滤掉；且源端与目标端的类型都要能识别出来，任一端类型
+   未知则该库被拒（`settings.py:1389`）。
+
 ## 5. 已知限制
 
 - 家庭视频没有 provider id，只能靠文件名匹配，两端文件名必须逐字符一致
